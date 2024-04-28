@@ -2,9 +2,18 @@
 #include <string.h>
 #include <uni.h>
 
+#include <freertos/FreeRTOS.h>
+#include "freertos/projdefs.h"
+#include "shared.h"
+
 typedef struct my_platform_instance_s {
   uni_gamepad_seat_t gamepad_seat;
 } my_platform_instance_t;
+
+// Deadzone. Couple of controllers I threw at this idle ~+/-5 and doing so much as breathing  near them will toss
+// another couple of pts. Moving 512 units over ~1/4 or 1/2 of throw means the values can change super quick and are 
+// quite sensitive, so 50 is actually a smaller deadzone than you'd expect.
+const int32_t DEAD_ZONE = 50;
 
 static void trigger_event_on_gamepad(uni_hid_device_t* d);
 static my_platform_instance_t* get_my_platform_instance(uni_hid_device_t* d);
@@ -51,14 +60,19 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     case UNI_CONTROLLER_CLASS_GAMEPAD:
       gp = &ctl->gamepad;
 
-      // uint8_t l_forward = gp->axis_y < 0 ? 1 : 0;
-      // uint8_t r_forward = gp->axis_ry < 0 ? 1 : 0;
-      uint16_t directional_magnitude = abs(gp->axis_y) > abs(gp->axis_ry) ? abs(gp->axis_y) : abs(gp->axis_ry);
+      control_t control = {
+        .left_direction = gp->axis_y > DEAD_ZONE ? REVERSE : gp->axis_y < -DEAD_ZONE ? FORWARD : NEUTRAL,
+        .right_direction = gp->axis_ry > DEAD_ZONE ? REVERSE : gp->axis_ry < -DEAD_ZONE ? FORWARD : NEUTRAL,
+        .left_magnitude = abs(gp->axis_y) > DEAD_ZONE ? abs(gp->axis_y) : 0,
+        .right_magnitude = abs(gp->axis_ry) > DEAD_ZONE ? abs(gp->axis_ry) : 0
+      };
+
+      xMessageBufferSend(message_buffer, &control, sizeof(control), pdMS_TO_TICKS(10));
+
+      uint16_t rumble_magnitude = control.left_magnitude > control.right_magnitude 
+        ? control.left_magnitude : control.right_magnitude;
       
-      // deadzone
-      directional_magnitude = directional_magnitude > 50 ? directional_magnitude : 0;
-      
-      uint8_t rumble_amount = 255 * directional_magnitude / 512;
+      uint8_t rumble_amount = 255 * rumble_magnitude / 512;
 
       if (NULL != d->report_parser.play_dual_rumble && rumble_amount > 0) {
         d->report_parser.play_dual_rumble(

@@ -1,4 +1,4 @@
-set(srcs "main.c" "my_platform.c")
+set(srcs "main.c" "my_platform.c" "drive.c")
 
 set(requires "bluepad32" "btstack")
 
