@@ -17,6 +17,7 @@
 
 int app_main(void) {
   initialize_message_buffer();
+  initialize_drive_mcpwm();
 
   xTaskCreatePinnedToCore(
     drive_loop,

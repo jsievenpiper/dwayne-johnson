@@ -23,5 +23,6 @@ extern MessageBufferHandle_t message_buffer;
 struct uni_platform* get_my_platform(void);
 void drive_loop(void*);
 void initialize_message_buffer(void);
+void initialize_drive_mcpwm(void);
 
 #endif // !DWAYNE_JOHNSON_SHAREDDWAYNE_JOHNSON_SHARED
