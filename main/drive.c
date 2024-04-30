@@ -162,6 +162,10 @@ void initialize_drive_mcpwm(void) {
   mcpwm_timer_start_stop(pwm_timer, MCPWM_TIMER_START_NO_STOP);
 }
 
+/**
+ * As the name implies, updates the current magnitude one unit such that it approaches the desired value while 
+ * accounting for our acceleration profile. If the value is already at the correct value, this method is a no-op.
+ */
 void accelerate(int16_t desired, int16_t* current) {
   // If accelerating, increase the magnitude by the acceleration profile.
   *current += UPDATE_PROFILE_ACCEL_AMOUNT;
@@ -172,6 +176,10 @@ void accelerate(int16_t desired, int16_t* current) {
   }
 }
 
+/**
+ * Similar to accelerate, updates the current magnitude one unit such that it approaches the desired value while
+ * account for our deceleration profile. If we're already at the correct value, this method is a no-op.
+ */
 void decelerate(int16_t desired, int16_t* current) {
   // If decelerating, same thing, but take into account the deceleration profile.
   *current -= UPDATE_PROFILE_DECEL_AMOUNT;
@@ -179,6 +187,38 @@ void decelerate(int16_t desired, int16_t* current) {
   // Don't let it undercut the desired value.
   if (*current < desired) {
     *current = desired;
+  }
+}
+
+void calculate_drive_state(
+  direction_t desired_direction,
+  direction_t* current_direction,
+  int16_t desired_magnitude,
+  int16_t* current_magnitude
+) {
+  // In this branch, the desired state is to be stopped. No matter the direction, decelerate toward zero. 
+  if (NEUTRAL == desired_direction || (desired_direction != *current_direction && NEUTRAL != *current_direction)) {
+    decelerate(0, current_magnitude);
+
+    // Once we hit zero, we can switch our current state to NEUTRAL as well.
+    if (0 == *current_magnitude) {
+      *current_direction = NEUTRAL;
+    }
+  }
+
+  // Desired state is to continue in the same direction as the motor is currently being driven, or the motor is being
+  // driven from an idle state.
+  else if (desired_direction == *current_direction || NEUTRAL == *current_direction) {
+    // Update the direction the motor is going.
+    *current_direction = desired_direction;
+
+    if (desired_magnitude > *current_magnitude) {
+      accelerate(desired_magnitude, current_magnitude);
+    }
+
+    else if (desired_magnitude < *current_magnitude) {
+      decelerate(desired_magnitude, current_magnitude);
+    }
   }
 }
 
@@ -223,6 +263,11 @@ void drive_loop(void* _pv_parameters) {
   //   with a different profile from acceleration, in case that is desirable.
   TickType_t last_wake_time = xTaskGetTickCount();
 
+  // This loop follows a pretty Elm-like message -> update -> render loop, but with hardware as our "render" portion.
+  // We start each event loop by querying our message buffer for updates to process. We apply those processes to our
+  // state (with accomodations for an "actual" (current) and desired state to account for the real world / human factor
+  // that isn't present in pure software). Then finally we "render" those values by adjusting the hardware outputs to
+  // appropriately represent our state.
   for (;;) {
     // Attempt to read a new desired state from the other core. We'll fast-forward through the whole queue, as any
     // intermediate values we weren't able to receive previously mean nothing to us now. We'll do this every loop cycle
@@ -231,36 +276,20 @@ void drive_loop(void* _pv_parameters) {
       received_bytes = xMessageBufferReceive(message_buffer, &desired_state, sizeof(desired_state), 0);
     } while (0 != received_bytes);
 
-    // In this branch, the desired state is to be stopped. No matter the direction, decelerate toward zero. 
-    if (
-      NEUTRAL == desired_state.right_direction 
-      || (desired_state.right_direction != current_state.right_direction && NEUTRAL != current_state.right_direction)
-    ) {
-      decelerate(0, &current_state.right_magnitude);
+    // update
+    calculate_drive_state(
+      desired_state.left_direction,
+      &current_state.left_direction,
+      desired_state.left_magnitude,
+      &current_state.left_magnitude
+    );
 
-      // Once we hit zero, we can switch our current state to NEUTRAL as well.
-      if (0 == current_state.right_magnitude) {
-        current_state.right_direction = NEUTRAL;
-      }
-    }
-
-    // Desired state is to continue in the same direction as the motor is currently being driven, or the motor is being
-    // driven from an idle state.
-    else if (
-      desired_state.right_direction == current_state.right_direction
-      || NEUTRAL == current_state.right_direction
-    ) {
-      // Update the direction the motor is going.
-      current_state.right_direction = desired_state.right_direction;
-
-      if (desired_state.right_magnitude > current_state.right_magnitude) {
-        accelerate(desired_state.right_magnitude, &current_state.right_magnitude);
-      }
-
-      else if (desired_state.right_magnitude < current_state.right_magnitude) {
-        decelerate(desired_state.right_magnitude, &current_state.right_magnitude);
-      }
-    }
+    calculate_drive_state(
+      desired_state.right_direction,
+      &current_state.right_direction,
+      desired_state.right_magnitude,
+      &current_state.right_magnitude
+    );
 
     mcpwm_comparator_set_compare_value(pwm_comparator_left, drive_magnitude_to_ticks(current_state.left_magnitude));
     mcpwm_comparator_set_compare_value(pwm_comparator_right, drive_magnitude_to_ticks(current_state.right_magnitude));
