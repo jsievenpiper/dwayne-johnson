@@ -7,6 +7,7 @@
 #include "driver/mcpwm_oper.h"
 #include "driver/mcpwm_timer.h"
 #include "driver/mcpwm_types.h"
+#include "hal/gpio_types.h"
 #include "hal/mcpwm_types.h"
 #include "portmacro.h"
 #include "soc/gpio_num.h"
@@ -20,6 +21,8 @@
 #define UPDATE_PROFILE_DECEL_AMOUNT 20
 #define PWM_LEFT_OUT GPIO_NUM_23
 #define PWM_RIGHT_OUT GPIO_NUM_27
+#define GPIO_DIR_LEFT_OUT GPIO_NUM_19
+#define GPIO_DIR_RIGHT_OUT GPIO_NUM_26
 
 static uint8_t message_buffer_storage[BUFFER_SIZE_ITEMS * sizeof(control_t)];
 StaticMessageBuffer_t message_buffer_structure;
@@ -87,6 +90,13 @@ void initialize_message_buffer(void) {
  * Initializes the PWM motor control generators and associated infrastructure around those.
  */
 void initialize_drive_mcpwm(void) {
+  // In addition to our PWM signals, we also have the ability to set directional digital signals to drive which
+  // direction we want the motor to spin. These motors are completely independently controlled, so we have two pins to
+  // signal on such that one motor could be spinning clockwise while the other spins counter-clockwise, for example
+  // (this would enable a zero turning radius rotation for "center wheel drive" configurations).
+  gpio_set_direction(GPIO_DIR_LEFT_OUT, GPIO_MODE_OUTPUT);
+  gpio_set_direction(GPIO_DIR_RIGHT_OUT, GPIO_MODE_OUTPUT);
+
   // Very conveniently, esp32 pwm timers can power multiple generators. Since our two motor control circuits are the
   // same, we'll get hardware-level synchronized pulses. Timers across groups can also be synchronized, but we just
   // need a single timer to run both controllers at the same frequency.
@@ -132,6 +142,8 @@ void initialize_drive_mcpwm(void) {
   mcpwm_new_generator(pwm_operator, &pwm_generator_config_right, &pwm_generator_right);
 
   // Initialize our drive system to zero. You know, so we don't flip a switch and send a kid flying off the drop zone.
+  gpio_set_level(GPIO_DIR_LEFT_OUT, 0);
+  gpio_set_level(GPIO_DIR_RIGHT_OUT, 0);
   mcpwm_comparator_set_compare_value(pwm_comparator_left, drive_magnitude_to_ticks(0));
   mcpwm_comparator_set_compare_value(pwm_comparator_right, drive_magnitude_to_ticks(0));
 
@@ -190,6 +202,11 @@ void decelerate(int16_t desired, int16_t* current) {
   }
 }
 
+/**
+ * Takes references to the desired state for a particular motor, along with pointers to the mutable current state of
+ * affairs, and accounts for those differences for a single tick. This method can then be called for N motors as
+ * necessary.
+ */
 void calculate_drive_state(
   direction_t desired_direction,
   direction_t* current_direction,
@@ -276,7 +293,8 @@ void drive_loop(void* _pv_parameters) {
       received_bytes = xMessageBufferReceive(message_buffer, &desired_state, sizeof(desired_state), 0);
     } while (0 != received_bytes);
 
-    // update
+    // For each motor, update the current drive state based on whatever the current desired state may be. These are
+    // pure state updates and will not change any hardware outputs at the moment.
     calculate_drive_state(
       desired_state.left_direction,
       &current_state.left_direction,
@@ -291,6 +309,17 @@ void drive_loop(void* _pv_parameters) {
       &current_state.right_magnitude
     );
 
+    // Now that our state is in order, we will "render" it out by updating our hardware outputs accordingly. We have a
+    // few different outputs to consider:
+    //
+    // - our two PWM signals, of which the duty cycle corresponds with some percentage of motor speed.
+    // - two basic digital gpio outputs that control the signal polarity on each motor respectively (which allow us to
+    //   spin the motor in whatever direction we see fit).
+
+    // For motor direction, it shouldn't technically matter what we set the value to for NEUTRAL. To make the logic
+    // flow here simple, we'll just assign it to the else case (so it'll go low).
+    gpio_set_level(GPIO_DIR_LEFT_OUT, FORWARD == current_state.left_direction ? 1 : 0);
+    gpio_set_level(GPIO_DIR_RIGHT_OUT, FORWARD == current_state.right_direction ? 1 : 0);
     mcpwm_comparator_set_compare_value(pwm_comparator_left, drive_magnitude_to_ticks(current_state.left_magnitude));
     mcpwm_comparator_set_compare_value(pwm_comparator_right, drive_magnitude_to_ticks(current_state.right_magnitude));
 
