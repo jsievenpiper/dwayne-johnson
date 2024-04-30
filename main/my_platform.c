@@ -8,6 +8,7 @@
 
 typedef struct my_platform_instance_s {
   uni_gamepad_seat_t gamepad_seat;
+  control_t last_control_value;
 } my_platform_instance_t;
 
 // Deadzone. Couple of controllers I threw at this idle ~+/-5 and doing so much as breathing  near them will toss
@@ -55,6 +56,7 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
 
 static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
   uni_gamepad_t* gp;
+  my_platform_instance_t* ins = get_my_platform_instance(d);
 
   switch (ctl->klass) {
     case UNI_CONTROLLER_CLASS_GAMEPAD:
@@ -66,8 +68,6 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
         .left_magnitude = abs(gp->axis_y) > DEAD_ZONE ? abs(gp->axis_y) : 0,
         .right_magnitude = abs(gp->axis_ry) > DEAD_ZONE ? abs(gp->axis_ry) : 0
       };
-
-      xMessageBufferSend(message_buffer, &control, sizeof(control), pdMS_TO_TICKS(10));
 
       uint16_t rumble_magnitude = control.left_magnitude > control.right_magnitude 
         ? control.left_magnitude : control.right_magnitude;
@@ -82,6 +82,11 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
           rumble_amount /* weak magnitude */, 
           40 /* strong magnitude */
         );
+      }
+
+      if (0 == control_equals(&ins->last_control_value, &control)) {
+        xMessageBufferSend(message_buffer, &control, sizeof(control), pdMS_TO_TICKS(10));
+        ins->last_control_value = control;
       }
 
       break;
