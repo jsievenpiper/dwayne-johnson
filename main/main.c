@@ -18,7 +18,17 @@
 int app_main(void) {
   initialize_message_buffer();
   initialize_drive_mcpwm();
+  initialize_display();
 
+  // Projects are no fun without unnecessary cute additions. This is one of those cute additions.
+  write_string("This fish was built", 0);
+  write_string("for speed!", 1);
+  write_string("waiting...", 3);
+  update_display();
+
+  // Bluetooth is totally plausible but still a lot for the ESP32. Give one whole core to bluetooth processing to keep
+  // it responsive and we'll settle for the other core. Remember when having two cores in a personal computer was a
+  // huge deal and now you can get it packaged in a $5 chip?
   xTaskCreatePinnedToCore(
     drive_loop,
     "drive",
@@ -28,7 +38,6 @@ int app_main(void) {
     NULL,
     1
   );
-
 
   // Don't use BTstack buffered UART. It conflicts with the console.
 #ifdef CONFIG_ESP_CONSOLE_UART

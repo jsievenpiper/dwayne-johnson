@@ -18,6 +18,7 @@ const int32_t DEAD_ZONE = 50;
 
 static void trigger_event_on_gamepad(uni_hid_device_t* d);
 static my_platform_instance_t* get_my_platform_instance(uni_hid_device_t* d);
+static uint8_t display_gamepad_battery_status(uni_hid_device_t* d);
 
 static void my_platform_init(int argc, const char** argv) {
   ARG_UNUSED(argc);
@@ -55,8 +56,14 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
 }
 
 static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
+  static uint8_t display_on = 1;
+  static uint8_t battery_status_updated = 0;
   uni_gamepad_t* gp;
   my_platform_instance_t* ins = get_my_platform_instance(d);
+
+  if (0 == battery_status_updated) {
+    battery_status_updated = display_gamepad_battery_status(d);
+  }
 
   switch (ctl->klass) {
     case UNI_CONTROLLER_CLASS_GAMEPAD:
@@ -85,8 +92,18 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
       }
 
       if (0 == control_equals(&ins->last_control_value, &control)) {
-        xMessageBufferSend(message_buffer, &control, sizeof(control), pdMS_TO_TICKS(10));
+        xMessageBufferSend(message_buffer, &control, sizeof(control), pdMS_TO_TICKS(1));
         ins->last_control_value = control;
+      }
+
+      if ((gp->buttons & BUTTON_A) && display_on) {
+        turn_off_display();
+        display_on = 0;
+      }
+
+      else if ((gp->buttons & BUTTON_B) && !display_on) {
+        turn_on_display();
+        display_on = 1;
       }
 
       break;
@@ -111,12 +128,7 @@ static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data)
         return;
       }
 
-      logi("custom: on_device_oob_event(): %d\n", event);
-
-      my_platform_instance_t* ins = get_my_platform_instance(d);
-      ins->gamepad_seat = ins->gamepad_seat == GAMEPAD_SEAT_A ? GAMEPAD_SEAT_B : GAMEPAD_SEAT_A;
-
-      trigger_event_on_gamepad(d);
+      display_gamepad_battery_status(d);
       break;
     }
 
@@ -135,6 +147,48 @@ static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data)
 //
 static my_platform_instance_t* get_my_platform_instance(uni_hid_device_t* d) {
   return (my_platform_instance_t*)&d->platform_data[0];
+}
+
+static uint8_t display_gamepad_battery_status(uni_hid_device_t* d) {
+  if (0 == d->controller.battery) {
+    return 0;
+  }
+
+  uint16_t battery_percentage = (d->controller.battery * 100) / 254;
+
+  char hundreds = battery_percentage / 100;
+  char tens = (battery_percentage % 100) / 10;
+  char ones = (battery_percentage % 10);
+
+
+  logi("%d %d battery (%d %d %d)", battery_percentage, hundreds, tens, ones);
+
+  write_string("Ready!", 0);
+  write_string("---------------------", 1);
+  write_string("Controller", 2);
+  
+  if (1 == hundreds) {
+    // bit of a special case, but if we have a hundreds place there's no need to actually wonder about the full battery
+    // percentage if we did our math correctly.
+    write_string("Battery: 100%", 3);
+  }
+
+  // And here's our regular ol' 0-99 battery percentage display logic.
+  else {
+    if (0 == tens) {
+      write_string("Battery:  %", 3);
+      write_char('0' + ones, 3, 9);
+    }
+
+    else {
+      write_string("Battery:   %", 3);
+      write_char('0' + tens, 3, 9);
+      write_char('0' + ones, 3, 10);
+    }
+  }
+
+  update_display();
+  return 1;
 }
 
 static void trigger_event_on_gamepad(uni_hid_device_t* d) {
