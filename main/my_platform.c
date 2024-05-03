@@ -192,8 +192,6 @@ static uint8_t display_gamepad_battery_status(uni_hid_device_t* d) {
 }
 
 static void trigger_event_on_gamepad(uni_hid_device_t* d) {
-  // my_platform_instance_t* ins = get_my_platform_instance(d);
-
   if (d->report_parser.play_dual_rumble != NULL) {
     d->report_parser.play_dual_rumble(
       d,

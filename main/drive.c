@@ -7,8 +7,10 @@
 #include "driver/mcpwm_oper.h"
 #include "driver/mcpwm_timer.h"
 #include "driver/mcpwm_types.h"
+#include "hal/adc_types.h"
 #include "hal/gpio_types.h"
 #include "hal/mcpwm_types.h"
+#include "esp_adc/adc_oneshot.h"
 #include "portmacro.h"
 #include "soc/gpio_num.h"
 
@@ -19,6 +21,9 @@
 #define UPDATE_LOOP_TICK_FREQUENCY 5
 #define UPDATE_PROFILE_ACCEL_AMOUNT 10
 #define UPDATE_PROFILE_DECEL_AMOUNT 20
+#define TOP_SPEED_ADJUSTMENT_INPUT GPIO_NUM_34
+#define TOP_SPEED_ADC_CHANNEL ADC_CHANNEL_6
+#define TOP_SPEED_RANGE 4095
 #define PWM_LEFT_OUT GPIO_NUM_23
 #define PWM_RIGHT_OUT GPIO_NUM_27
 #define GPIO_DIR_LEFT_OUT GPIO_NUM_19
@@ -33,6 +38,7 @@ mcpwm_cmpr_handle_t pwm_comparator_left = NULL;
 mcpwm_cmpr_handle_t pwm_comparator_right = NULL;
 mcpwm_gen_handle_t pwm_generator_left = NULL;
 mcpwm_gen_handle_t pwm_generator_right = NULL;
+adc_oneshot_unit_handle_t adc = NULL;
 
 /**
  * Simple conversion from the 9-bit controller value to the amount of ticks that would have to occur to generate a 
@@ -41,8 +47,8 @@ mcpwm_gen_handle_t pwm_generator_right = NULL;
  * When our potentiometers come in, this will then also be scaled to a defined maximum value based on the potentiometer
  * value to make this range less twitchy if it proves that the maximum speeds are always too high.
  */
-static inline uint32_t drive_magnitude_to_ticks(uint16_t magnitude) {
-  return TICK_RESOLUTION * magnitude / 512;
+static inline uint32_t drive_magnitude_to_ticks(uint16_t magnitude, int max_speed) {
+  return (TICK_RESOLUTION * magnitude / 512) * (TOP_SPEED_RANGE - max_speed) / TOP_SPEED_RANGE;
 }
 
 /**
@@ -144,8 +150,8 @@ void initialize_drive_mcpwm(void) {
   // Initialize our drive system to zero. You know, so we don't flip a switch and send a kid flying off the drop zone.
   gpio_set_level(GPIO_DIR_LEFT_OUT, 0);
   gpio_set_level(GPIO_DIR_RIGHT_OUT, 0);
-  mcpwm_comparator_set_compare_value(pwm_comparator_left, drive_magnitude_to_ticks(0));
-  mcpwm_comparator_set_compare_value(pwm_comparator_right, drive_magnitude_to_ticks(0));
+  mcpwm_comparator_set_compare_value(pwm_comparator_left, drive_magnitude_to_ticks(0, TOP_SPEED_RANGE));
+  mcpwm_comparator_set_compare_value(pwm_comparator_right, drive_magnitude_to_ticks(0, TOP_SPEED_RANGE));
 
   // Define the timer behaviors that drive our generator. To build simple active-high asymmetric signals, we'll just
   // count up and go low when the comparator threshold is hit.
@@ -172,6 +178,27 @@ void initialize_drive_mcpwm(void) {
   // Fingers crossed, fire up the timer.
   mcpwm_timer_enable(pwm_timer);
   mcpwm_timer_start_stop(pwm_timer, MCPWM_TIMER_START_NO_STOP);
+}
+
+/**
+ * Initializes the analog-to-digital converter that reads a simple potentiometer to adjust the max speed. This will
+ * allow the controller to be more refined and less twitchy if say, for example, we never use the top 30% of the top
+ * speed, by rescaling the controller inputs from 0->70 (or whatever the potentiometer is dialed to).
+ */
+void initialize_speed_control_adc(void) {
+  adc_oneshot_unit_init_cfg_t adc_config = {
+    .unit_id = ADC_UNIT_1,
+    .ulp_mode = ADC_ULP_MODE_DISABLE
+  };
+
+  adc_oneshot_new_unit(&adc_config, &adc);
+
+  adc_oneshot_chan_cfg_t config = {
+    .bitwidth = ADC_BITWIDTH_DEFAULT,
+    .atten = ADC_ATTEN_DB_12
+  };
+
+  adc_oneshot_config_channel(adc, TOP_SPEED_ADC_CHANNEL, &config);
 }
 
 /**
@@ -243,6 +270,9 @@ void calculate_drive_state(
  * This is our core two main loop if you will, and should never return.
  */
 void drive_loop(void* _pv_parameters) {
+  // Stores our maximum speed as read from the speed controller input.
+  int max_speed = 0;
+
   // This stores the current state of our _intended_ drive control.
   control_t desired_state = idle_control_value();
 
@@ -293,6 +323,12 @@ void drive_loop(void* _pv_parameters) {
       received_bytes = xMessageBufferReceive(message_buffer, &desired_state, sizeof(desired_state), 0);
     } while (0 != received_bytes);
 
+    // Pull the latest value from our top-speed controller. This doesn't _really_ need to be executed every drive loop
+    // in practice, because we would generally not have physical access during a production run, but we also want to
+    // be able to experiment and tune this during testing and it's nicer than having to reboot the chip (even though it
+    // is pretty darn quick to reboot).
+    adc_oneshot_read(adc, TOP_SPEED_ADC_CHANNEL, &max_speed);
+
     // For each motor, update the current drive state based on whatever the current desired state may be. These are
     // pure state updates and will not change any hardware outputs at the moment.
     calculate_drive_state(
@@ -320,8 +356,16 @@ void drive_loop(void* _pv_parameters) {
     // flow here simple, we'll just assign it to the else case (so it'll go low).
     gpio_set_level(GPIO_DIR_LEFT_OUT, FORWARD == current_state.left_direction ? 1 : 0);
     gpio_set_level(GPIO_DIR_RIGHT_OUT, FORWARD == current_state.right_direction ? 1 : 0);
-    mcpwm_comparator_set_compare_value(pwm_comparator_left, drive_magnitude_to_ticks(current_state.left_magnitude));
-    mcpwm_comparator_set_compare_value(pwm_comparator_right, drive_magnitude_to_ticks(current_state.right_magnitude));
+    
+    mcpwm_comparator_set_compare_value(
+      pwm_comparator_left, 
+      drive_magnitude_to_ticks(current_state.left_magnitude, max_speed)
+    );
+
+    mcpwm_comparator_set_compare_value(
+      pwm_comparator_right, 
+      drive_magnitude_to_ticks(current_state.right_magnitude, max_speed)
+    );
 
     vTaskDelayUntil(&last_wake_time, UPDATE_LOOP_TICK_FREQUENCY);
   }

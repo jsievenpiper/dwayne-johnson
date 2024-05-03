@@ -29,6 +29,7 @@ uint8_t control_equals(control_t*, control_t*);
 void drive_loop(void*);
 void initialize_message_buffer(void);
 void initialize_drive_mcpwm(void);
+void initialize_speed_control_adc(void);
 
 // display
 void initialize_display(void);

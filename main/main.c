@@ -18,6 +18,7 @@
 int app_main(void) {
   initialize_message_buffer();
   initialize_drive_mcpwm();
+  initialize_speed_control_adc();
   initialize_display();
 
   // Projects are no fun without unnecessary cute additions. This is one of those cute additions.
