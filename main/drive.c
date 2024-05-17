@@ -23,7 +23,7 @@
 #define UPDATE_PROFILE_DECEL_AMOUNT 20
 #define TOP_SPEED_ADJUSTMENT_INPUT GPIO_NUM_34
 #define TOP_SPEED_ADC_CHANNEL ADC_CHANNEL_6
-#define TOP_SPEED_RANGE 4095
+#define TOP_SPEED_RANGE 4000
 #define PWM_LEFT_OUT GPIO_NUM_23
 #define PWM_RIGHT_OUT GPIO_NUM_27
 #define GPIO_DIR_LEFT_OUT GPIO_NUM_19
@@ -327,7 +327,11 @@ void drive_loop(void* _pv_parameters) {
     // in practice, because we would generally not have physical access during a production run, but we also want to
     // be able to experiment and tune this during testing and it's nicer than having to reboot the chip (even though it
     // is pretty darn quick to reboot).
+    //
+    // While we're at it, truncate to just a couple of digits of accuracy. 0-4095 is more than we can physically
+    // comprehend, and the data off the line is noisy. This should help it stabilize.
     adc_oneshot_read(adc, TOP_SPEED_ADC_CHANNEL, &max_speed);
+    max_speed = (max_speed / 100) * 100;
 
     // For each motor, update the current drive state based on whatever the current desired state may be. These are
     // pure state updates and will not change any hardware outputs at the moment.

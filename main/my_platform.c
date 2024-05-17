@@ -3,6 +3,8 @@
 #include <uni.h>
 
 #include <freertos/FreeRTOS.h>
+#include "controller/uni_controller.h"
+#include "controller/uni_gamepad.h"
 #include "freertos/projdefs.h"
 #include "shared.h"
 
@@ -16,10 +18,13 @@ typedef struct my_platform_instance_s {
 // quite sensitive, so 50 is actually a smaller deadzone than you'd expect.
 const int32_t DEAD_ZONE = 50;
 
-static void trigger_event_on_gamepad(uni_hid_device_t* d);
-static my_platform_instance_t* get_my_platform_instance(uni_hid_device_t* d);
-static uint8_t display_gamepad_battery_status(uni_hid_device_t* d);
+static void trigger_event_on_gamepad(uni_hid_device_t*);
+static my_platform_instance_t* get_my_platform_instance(uni_hid_device_t*);
+static uint8_t display_gamepad_battery_status(uni_hid_device_t*);
 
+/**
+ * Executed when the system is first initialized -- nothing fancy to do here.
+ */
 static void my_platform_init(int argc, const char** argv) {
   ARG_UNUSED(argc);
   ARG_UNUSED(argv);
@@ -27,6 +32,9 @@ static void my_platform_init(int argc, const char** argv) {
   logi("custom: init()\n");
 }
 
+/**
+ * Executed when the system initialization is complete. Here we will enable Bluetooth connections to occur.
+ */
 static void my_platform_on_init_complete(void) {
   logi("custom: on_init_complete()\n");
 
@@ -36,54 +44,104 @@ static void my_platform_on_init_complete(void) {
   uni_bt_list_keys_unsafe();
 }
 
-static void my_platform_on_device_connected(uni_hid_device_t* d) {
-  logi("device connected, disabling other devices from connecting: %p\n", d);
+/**
+ * Once a device has connected, we'll prevent other devices from connecting as a precautionary measure.
+ */
+static void my_platform_on_device_connected(uni_hid_device_t* hid) {
+  logi("device connected, disabling other devices from connecting: %p\n", hid);
   uni_bt_enable_new_connections_safe(false);
 }
 
-static void my_platform_on_device_disconnected(uni_hid_device_t* d) {
-  logi("device disconnected, reenabling connections: %p\n", d);
+/**
+ * When a device disconnects, we'll allow connections again in case a controller accidentally drops out of range or
+ * something like that.
+ */
+static void my_platform_on_device_disconnected(uni_hid_device_t* hid) {
+  logi("device disconnected, reenabling connections: %p\n", hid);
   uni_bt_enable_new_connections_safe(true);
 }
 
-static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
-  logi("custom: device ready: %p\n", d);
-  my_platform_instance_t* ins = get_my_platform_instance(d);
-  ins->gamepad_seat = GAMEPAD_SEAT_A;
+/**
+ * Invoked when a controller is connected. We just do some light weight bookkeeping and then a small pulse on the
+ * gamepad to let the operator know we're ready to rumble.
+ */
+static uni_error_t my_platform_on_device_ready(uni_hid_device_t* hid) {
+  logi("custom: device ready: %p\n", hid);
+  my_platform_instance_t* instance = get_my_platform_instance(hid);
+  instance->gamepad_seat = GAMEPAD_SEAT_A;
 
-  trigger_event_on_gamepad(d);
+  trigger_event_on_gamepad(hid);
   return UNI_ERROR_SUCCESS;
 }
 
-static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
+/**
+ * Invoked specifically when the controller's right trigger is pulled.
+ */
+static control_t my_platform_on_throttle_data(uni_gamepad_t* gamepad) {
+  return (control_t) {
+    .left_direction = FORWARD,
+    .right_direction = REVERSE,
+    .left_magnitude = gamepad->throttle / 2,
+    .right_magnitude = gamepad->throttle / 2
+  };
+}
+
+/**
+ * Invoked specifically when the controller's left trigger is pulled.
+ */
+static control_t my_platform_on_brake_data(uni_gamepad_t* gamepad) {
+  return (control_t) {
+    .left_direction = REVERSE,
+    .right_direction = FORWARD,
+    .left_magnitude = gamepad->brake / 2,
+    .right_magnitude = gamepad->brake / 2
+  };
+}
+
+/**
+ * Invoked in all other cases, and reads the desired state from the analog sticks.
+ */
+static control_t my_platform_on_axis_data(uni_gamepad_t* gamepad) {
+  return (control_t) {
+    .left_direction = gamepad->axis_y > DEAD_ZONE ? REVERSE : gamepad->axis_y < -DEAD_ZONE ? FORWARD : NEUTRAL,
+    .right_direction = gamepad->axis_ry > DEAD_ZONE ? REVERSE : gamepad->axis_ry < -DEAD_ZONE ? FORWARD : NEUTRAL,
+    .left_magnitude = abs(gamepad->axis_y) > DEAD_ZONE ? abs(gamepad->axis_y) : 0,
+    .right_magnitude = abs(gamepad->axis_ry) > DEAD_ZONE ? abs(gamepad->axis_ry) : 0
+  };
+}
+
+/**
+ * Invoked every time there is new controller data. This will delegate to other more specialized handlers (above) as
+ * necessary.
+ */
+static void my_platform_on_controller_data(uni_hid_device_t* hid, uni_controller_t* controller) {
   static uint8_t display_on = 1;
   static uint8_t battery_status_updated = 0;
-  uni_gamepad_t* gp;
-  my_platform_instance_t* ins = get_my_platform_instance(d);
+  uni_gamepad_t* gamepad;
+  my_platform_instance_t* instance = get_my_platform_instance(hid);
 
   if (0 == battery_status_updated) {
-    battery_status_updated = display_gamepad_battery_status(d);
+    battery_status_updated = display_gamepad_battery_status(hid);
   }
 
-  switch (ctl->klass) {
+  switch (controller->klass) {
     case UNI_CONTROLLER_CLASS_GAMEPAD:
-      gp = &ctl->gamepad;
+      gamepad = &controller->gamepad;
 
-      control_t control = {
-        .left_direction = gp->axis_y > DEAD_ZONE ? REVERSE : gp->axis_y < -DEAD_ZONE ? FORWARD : NEUTRAL,
-        .right_direction = gp->axis_ry > DEAD_ZONE ? REVERSE : gp->axis_ry < -DEAD_ZONE ? FORWARD : NEUTRAL,
-        .left_magnitude = abs(gp->axis_y) > DEAD_ZONE ? abs(gp->axis_y) : 0,
-        .right_magnitude = abs(gp->axis_ry) > DEAD_ZONE ? abs(gp->axis_ry) : 0
-      };
+      control_t control = gamepad->throttle > DEAD_ZONE 
+        ? my_platform_on_throttle_data(gamepad)
+        : gamepad->brake > DEAD_ZONE
+        ? my_platform_on_brake_data(gamepad)
+        : my_platform_on_axis_data(gamepad);
 
       uint16_t rumble_magnitude = control.left_magnitude > control.right_magnitude 
         ? control.left_magnitude : control.right_magnitude;
       
       uint8_t rumble_amount = 255 * rumble_magnitude / 512;
 
-      if (NULL != d->report_parser.play_dual_rumble && rumble_amount > 0) {
-        d->report_parser.play_dual_rumble(
-          d, 
+      if (NULL != hid->report_parser.play_dual_rumble && rumble_amount > 0) {
+        hid->report_parser.play_dual_rumble(
+          hid, 
           0 /* delayed start ms */, 
           250 /* duration ms */,
           rumble_amount /* weak magnitude */, 
@@ -91,17 +149,17 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
         );
       }
 
-      if (0 == control_equals(&ins->last_control_value, &control)) {
+      if (0 == control_equals(&instance->last_control_value, &control)) {
         xMessageBufferSend(message_buffer, &control, sizeof(control), pdMS_TO_TICKS(1));
-        ins->last_control_value = control;
+        instance->last_control_value = control;
       }
 
-      if ((gp->buttons & BUTTON_A) && display_on) {
+      if ((gamepad->buttons & BUTTON_A) && display_on) {
         turn_off_display();
         display_on = 0;
       }
 
-      else if ((gp->buttons & BUTTON_B) && !display_on) {
+      else if ((gamepad->buttons & BUTTON_B) && !display_on) {
         turn_on_display();
         display_on = 1;
       }
@@ -142,13 +200,16 @@ static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data)
   }
 }
 
-//
-// Helpers
-//
+/**
+ * Helper function to get internal state related to an HID device (controller, in our case).
+ */
 static my_platform_instance_t* get_my_platform_instance(uni_hid_device_t* d) {
   return (my_platform_instance_t*)&d->platform_data[0];
 }
 
+/**
+ * For the given controller, relay it's battery levels onto our OLED.
+ */
 static uint8_t display_gamepad_battery_status(uni_hid_device_t* d) {
   if (0 == d->controller.battery) {
     return 0;
@@ -191,6 +252,9 @@ static uint8_t display_gamepad_battery_status(uni_hid_device_t* d) {
   return 1;
 }
 
+/**
+ * Small little routine when the controller connects to rumble a bit and light up pink.
+ */
 static void trigger_event_on_gamepad(uni_hid_device_t* d) {
   if (d->report_parser.play_dual_rumble != NULL) {
     d->report_parser.play_dual_rumble(
@@ -207,9 +271,10 @@ static void trigger_event_on_gamepad(uni_hid_device_t* d) {
   }
 }
 
-//
-// Entry Point
-//
+/**
+ * Defines a series of function pointers that allow us to have callbacks into the controller connection and data
+ * procedures. This will be how we primarily obtain data from the controller for use in the rest of the system.
+ */
 struct uni_platform* get_my_platform(void) {
   static struct uni_platform plat = {
     .name = "custom",

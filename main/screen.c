@@ -14,6 +14,10 @@
 #define SSD1306_ADDRESS 0x3C
 #define MAX_CHARS_PER_LINE (HORIZONTAL_RESOLUTION / FONT_WIDTH)
 
+// These bits represent individual pixels in our (limited) bitmap font. Not every character is represented, and the
+// font starts at 0x20 (space) -- which is why it is all zeroes, spaces are invisible! Any non-zero bit will be a pixel
+// on the screen. Our font is 6px wide by 8px tall, and our screen is 32px tall, which gives us 4 complete lines of
+// text with roughly 21 characters per line (128px/6px).
 static const uint8_t FONT[][FONT_WIDTH] = {
   {0x00,0x00,0x00,0x00,0x00,0x00},	// 0x20
   {0x00,0x00,0x06,0x5F,0x06,0x00},	// 0x21
@@ -117,11 +121,17 @@ static uint8_t* lcd;
 i2c_master_bus_handle_t master_handle;
 i2c_master_dev_handle_t display_handle;
 
+/**
+ * Transmits the display buffer to the screen itself.
+ */
 void update_display(void) {
   i2c_master_transmit(display_handle, lcd, LCD_CACHE_SIZE, -1);
   i2c_master_bus_wait_all_done(master_handle, -1);
 }
 
+/**
+ * Clears the display buffer and transmits it to the screen.
+ */
 void clear_display(void) {
   memset(lcd, 0x00, LCD_CACHE_SIZE);
 
@@ -129,6 +139,10 @@ void clear_display(void) {
   update_display();
 }
 
+/**
+ * Places the character glyph data for the given character at the index for the appropriate page. Does _not_ update
+ * the display.
+ */ 
 void write_char(char c, uint8_t page, uint8_t idx) {
   const uint8_t* character_glyph = FONT[c - 0x20];
   uint8_t i = 0;
@@ -138,6 +152,10 @@ void write_char(char c, uint8_t page, uint8_t idx) {
   }
 }
 
+/**
+ * Writes a series of characters to the display on the given page -- wiping out everything else on that page. Does not
+ * update the display.
+ */
 void write_string(char* string, uint8_t page) {
   uint8_t i = 0;
 
@@ -152,16 +170,26 @@ void write_string(char* string, uint8_t page) {
   }
 }
 
+/**
+ * Turns the display on.
+ */
 void turn_on_display(void) {
   i2c_master_transmit(display_handle, (uint8_t[]) { 0x80, 0xAF }, 2, -1);
   i2c_master_bus_wait_all_done(master_handle, -1);
 }
 
+/**
+ * Turns the display off.
+ */
 void turn_off_display(void) {
   i2c_master_transmit(display_handle, (uint8_t[]) { 0x80, 0xAE }, 2, -1);
   i2c_master_bus_wait_all_done(master_handle, -1);
 }
 
+/**
+ * Fancy routine that sends the right magic incantation to turn on the display based on the needs of our use case and
+ * the spec sheet of the display.
+ */
 void initialize_display(void) {
   lcd = malloc(LCD_CACHE_SIZE);
 
